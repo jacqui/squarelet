@@ -9,6 +9,10 @@ events {
 }
 
 http {
+
+    map_hash_bucket_size <%= ENV.fetch("NGINX_HASH_BUCKET_SIZE", 128) %>;
+    map_hash_max_size <%= ENV.fetch("NGINX_HASH_MAX_SIZE", 4096) %>;
+
 	gzip on;
 	gzip_http_version 1.0;
 	gzip_comp_level 5;
@@ -39,8 +43,6 @@ http {
             <%= ip %> 1;
         <% end %>
     }
-
-    map_hash_bucket_size <%= ENV.fetch("NGINX_MAX_BUCKET_SIZE", 128) %>;
 
     map "$whitelist:$http_x_bypass_rate_limit" $limit_key {
         # default is to limit by ip address
