@@ -34,6 +34,9 @@ class PaymentForm(StripeForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._set_group_options()
+        # stripe token is only required if switching to a paid plan
+        # this is checked in the clean method
+        self.fields["stripe_token"].required = False
 
         self.helper = FormHelper()
         self.helper.layout = Layout(
@@ -90,7 +93,7 @@ class PaymentForm(StripeForm):
         data = super().clean()
 
         payment_required = data["plan"] != self.organization.plan and (
-            data["plan"].base_price > 0 or data["plan"].price_per_user > 0
+            data["plan"].requires_payment()
         )
         payment_supplied = data.get("use_card_on_file") or data.get("stripe_token")
 

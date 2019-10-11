@@ -198,6 +198,8 @@ TEMPLATES = [
                 "django.contrib.messages.context_processors.messages",
                 "squarelet.core.context_processors.settings",
                 "squarelet.core.context_processors.payment_failed",
+                "squarelet.core.context_processors.payment_failed",
+                "squarelet.core.context_processors.mixpanel",
             ],
         },
     }
@@ -273,6 +275,7 @@ ACCOUNT_FORMS = {
     "reset_password_from_key": "squarelet.users.forms.ResetPasswordKeyForm",
 }
 ACCOUNT_SIGNUP_PASSWORD_ENTER_TWICE = False
+ACCOUNT_SESSION_REMEMBER = True
 
 
 # django-compressor
@@ -320,9 +323,15 @@ STRIPE_PUB_KEY = env("STRIPE_PUB_KEY")
 STRIPE_SECRET_KEY = env("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET")
 
+# mailgun
+# ------------------------------------------------------------------------------
+MAILGUN_ACCESS_KEY = env("MAILGUN_ACCESS_KEY")
+
+
 # sesame
 # ------------------------------------------------------------------------------
 SESAME_MAX_AGE = 60 * 60 * 24 * 2  # 2 days
+SESAME_ONE_TIME = True
 
 # django-debug-toolbar
 # ------------------------------------------------------------------------------
@@ -353,3 +362,7 @@ DOGSLOW_LOGGER = "dogslow"  # can be anything, but must match `logger` below
 DOGSLOW_LOG_TO_SENTRY = True
 
 FORM_RENDERER = "django.forms.renderers.TemplatesSetting"
+
+# mixpanel
+# ------------------------------------------------------------------------------
+MIXPANEL_TOKEN = env("MIXPANEL_TOKEN")

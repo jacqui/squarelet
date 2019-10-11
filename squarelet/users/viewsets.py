@@ -1,6 +1,4 @@
 # Django
-# Third Party
-# Third Party
 from django.core.exceptions import ValidationError
 from django.db.models.query import Prefetch
 from django.http.response import Http404
@@ -81,7 +79,8 @@ class UrlAuthTokenViewSet(viewsets.ViewSet):
     def retrieve(self, request, pk=None):
         # pylint: disable=invalid-name
         try:
-            user = get_object_or_404(User, pk=pk)
+            # individual_organization_id is the uuid of the user
+            user = get_object_or_404(User, individual_organization_id=pk)
         except ValidationError:
             raise Http404
         return Response(sesame.utils.get_parameters(user))

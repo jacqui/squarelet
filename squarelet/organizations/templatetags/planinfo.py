@@ -9,11 +9,15 @@ register = template.Library()
 
 
 @register.simple_tag
-def planinfo(field="pk"):
+def planinfo(organization=None, field="pk"):
+    if organization:
+        plans = Plan.objects.choices(organization)
+    else:
+        plans = Plan.objects.filter(public=True)
     plan_info = {
         p[field]: p
-        for p in Plan.objects.values(
-            "pk", "slug", "base_price", "price_per_user", "minimum_users"
+        for p in plans.values(
+            "pk", "slug", "base_price", "price_per_user", "minimum_users", "annual"
         )
     }
     return json_script(plan_info, "_id-planInfo")

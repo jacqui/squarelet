@@ -5,13 +5,12 @@ from django.contrib.staticfiles.templatetags.staticfiles import static
 from django.db import models, transaction
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.timezone import get_current_timezone
 from django.utils.translation import ugettext_lazy as _
 
 # Standard Library
 import logging
 import uuid
-from datetime import date, datetime
+from datetime import date
 
 # Third Party
 import stripe
@@ -27,7 +26,12 @@ from squarelet.core.mixins import AvatarMixin
 from squarelet.oidc.middleware import send_cache_invalidations
 
 # Local
-from .querysets import InvitationQuerySet, OrganizationQuerySet, PlanQuerySet
+from .querysets import (
+    ChargeQuerySet,
+    InvitationQuerySet,
+    OrganizationQuerySet,
+    PlanQuerySet,
+)
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 stripe.api_version = "2018-09-24"
@@ -42,36 +46,82 @@ class Organization(AvatarMixin, models.Model):
 
     objects = OrganizationQuerySet.as_manager()
 
-    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    uuid = models.UUIDField(
+        _("UUID"),
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        help_text=_("Uniquely identify the organization across services"),
+    )
 
-    name = models.CharField(_("name"), max_length=255)
-    slug = AutoSlugField(_("slug"), populate_from="name", unique=True)
-    created_at = AutoCreatedField(_("created at"))
-    updated_at = AutoLastModifiedField(_("updated at"))
+    name = models.CharField(
+        _("name"), max_length=255, help_text=_("The name of the organization")
+    )
+    slug = AutoSlugField(
+        _("slug"),
+        populate_from="name",
+        unique=True,
+        help_text=_("A unique slug for use in URLs"),
+    )
+    created_at = AutoCreatedField(
+        _("created at"), help_text=_("When this organization was created")
+    )
+    updated_at = AutoLastModifiedField(
+        _("updated at"), help_text=_("When this organization was last updated")
+    )
 
-    avatar = ImageField(_("avatar"), upload_to="org_avatars", blank=True)
+    avatar = ImageField(
+        _("avatar"),
+        upload_to="org_avatars",
+        blank=True,
+        help_text=_("An image to represent the organization"),
+    )
 
     users = models.ManyToManyField(
-        "users.User", through="organizations.Membership", related_name="organizations"
+        verbose_name=_("users"),
+        to="users.User",
+        through="organizations.Membership",
+        related_name="organizations",
+        help_text=_("The user's in this organization"),
     )
 
     plan = models.ForeignKey(
-        "organizations.Plan", on_delete=models.PROTECT, related_name="organizations"
+        verbose_name=_("plan"),
+        to="organizations.Plan",
+        on_delete=models.PROTECT,
+        related_name="organizations",
+        help_text=_("The current plan this organization is subscribed to"),
     )
     next_plan = models.ForeignKey(
-        "organizations.Plan",
+        verbose_name=_("next plan"),
+        to="organizations.Plan",
         on_delete=models.PROTECT,
         related_name="pending_organizations",
+        help_text=_(
+            "The pending plan to be updated to on the next billing cycle - "
+            "used when downgrading a plan to let the organization finish out a "
+            "subscription is paid for"
+        ),
     )
     individual = models.BooleanField(
         _("individual organization"),
         default=False,
         help_text=_("This organization is solely for the use of one user"),
     )
-    private = models.BooleanField(_("private organization"), default=False)
+    private = models.BooleanField(
+        _("private organization"),
+        default=False,
+        help_text=_(
+            "This organization's information and membership is not made public"
+        ),
+    )
 
     # Book keeping
-    max_users = models.IntegerField(_("maximum users"), default=5)
+    max_users = models.IntegerField(
+        _("maximum users"),
+        default=5,
+        help_text=_("The maximum number of users in this organization"),
+    )
     update_on = models.DateField(
         _("date update"),
         null=True,
@@ -81,12 +131,29 @@ class Organization(AvatarMixin, models.Model):
 
     # stripe
     customer_id = models.CharField(
-        _("customer id"), max_length=255, unique=True, blank=True, null=True
+        _("customer id"),
+        max_length=255,
+        unique=True,
+        blank=True,
+        null=True,
+        help_text=_("The organization's corresponding ID on stripe"),
     )
     subscription_id = models.CharField(
-        _("subscription id"), max_length=255, unique=True, blank=True, null=True
+        _("subscription id"),
+        max_length=255,
+        unique=True,
+        blank=True,
+        null=True,
+        help_text=_("The organization's corresponding subscription ID on stripe"),
     )
-    payment_failed = models.BooleanField(_("payment failed"), default=False)
+    payment_failed = models.BooleanField(
+        _("payment failed"),
+        default=False,
+        help_text=_(
+            "A payment for this organization has failed - they should update their "
+            "payment information"
+        ),
+    )
 
     default_avatar = static("images/avatars/organization.png")
 
@@ -114,6 +181,18 @@ class Organization(AvatarMixin, models.Model):
             return self.user.get_absolute_url()
         else:
             return reverse("organizations:detail", kwargs={"slug": self.slug})
+
+    @property
+    def email(self):
+        """Get an email for this organization"""
+        if self.individual:
+            return self.user.email
+
+        receipt_email = self.receipt_emails.first()
+        if receipt_email:
+            return receipt_email.email
+
+        return self.users.filter(memberships__admin=True).first().email
 
     # User Management
     def has_admin(self, user):
@@ -150,12 +229,10 @@ class Organization(AvatarMixin, models.Model):
         if self.customer_id:
             try:
                 return stripe.Customer.retrieve(self.customer_id)
-            except stripe.error.InvalidRequestError:
+            except stripe.error.InvalidRequestError:  # pragma: no cover
                 pass
 
-        customer = stripe.Customer.create(
-            description=self.users.first().username if self.individual else self.name
-        )
+        customer = stripe.Customer.create(description=self.name, email=self.email)
         self.customer_id = customer.id
         self.save()
         return customer
@@ -165,7 +242,7 @@ class Organization(AvatarMixin, models.Model):
         if self.subscription_id:
             try:
                 return stripe.Subscription.retrieve(self.subscription_id)
-            except stripe.error.InvalidRequestError:
+            except stripe.error.InvalidRequestError:  # pragma: no cover
                 return None
         else:
             return None
@@ -174,7 +251,11 @@ class Organization(AvatarMixin, models.Model):
     def card(self):
         """Retrieve the customer's default credit card on file, if there is one"""
         if self.customer.default_source:
-            return self.customer.sources.retrieve(self.customer.default_source)
+            source = self.customer.sources.retrieve(self.customer.default_source)
+            if source.object == "card":
+                return source
+            else:
+                return None
         else:
             return None
 
@@ -192,11 +273,18 @@ class Organization(AvatarMixin, models.Model):
         self.customer.save()
         send_cache_invalidations("organization", self.uuid)
 
-    def set_subscription(self, token, plan, max_users):
+    def set_subscription(self, token, plan, max_users, user):
         if self.individual:
             max_users = 1
         if token:
             self.save_card(token)
+
+        # store so we can log
+        from_plan, from_next_plan, from_max_users = (
+            self.plan,
+            self.next_plan,
+            self.max_users,
+        )
 
         if self.plan.free() and not plan.free():
             # create a subscription going from free to non-free
@@ -206,32 +294,56 @@ class Organization(AvatarMixin, models.Model):
             self._cancel_subscription(plan)
         elif not self.plan.free() and not plan.free():
             # modify a subscription going from non-free to non-free
-            self._modify_subscription(plan, max_users)
+            self._modify_subscription(self.customer, plan, max_users)
         else:
             # just change the plan without touching stripe if going free to free
             self._modify_plan(plan, max_users)
 
+        self.change_logs.create(
+            user=user,
+            reason=OrganizationChangeLog.UPDATED,
+            from_plan=from_plan,
+            from_next_plan=from_next_plan,
+            from_max_users=from_max_users,
+            to_plan=self.plan,
+            to_next_plan=self.next_plan,
+            to_max_users=self.max_users,
+        )
+
+    @transaction.atomic
     def _create_subscription(self, customer, plan, max_users):
         """Create a subscription on stripe for the new plan"""
 
-        subscription = customer.subscriptions.create(
-            items=[{"plan": plan.stripe_id, "quantity": max_users}],
-            billing="send_invoice" if plan.annual else "charge_automatically",
-        )
+        def stripe_create_subscription():
+            """Call this after the current transaction is committed,
+            to ensure the organization is in the database before we
+            receive the charge succeeded webhook
+            """
+            if not customer.email:  # pragma: no cover
+                customer.email = self.email
+                customer.save()
+            subscription = customer.subscriptions.create(
+                items=[{"plan": plan.stripe_id, "quantity": max_users}],
+                billing="send_invoice" if plan.annual else "charge_automatically",
+                days_until_due=30 if plan.annual else None,
+            )
+            self.subscription_id = subscription.id
+            self.save()
 
         self.plan = plan
         self.next_plan = plan
         self.max_users = max_users
         self.update_on = date.today() + relativedelta(months=1)
-        self.subscription_id = subscription.id
         self.save()
+        transaction.on_commit(stripe_create_subscription)
 
     def _cancel_subscription(self, plan):
         """Cancel the subscription at period end on stripe for the new plan"""
         if self.subscription is not None:
             self.subscription.cancel_at_period_end = True
             self.subscription.save()
-        else:
+            self.subscription_id = None
+        else:  # pragma: no cover
             logger.error(
                 "Attempting to cancel subscription for organization: %s %s "
                 "but no subscription was found",
@@ -242,9 +354,23 @@ class Organization(AvatarMixin, models.Model):
         self.next_plan = plan
         self.save()
 
-    def _modify_subscription(self, plan, max_users):
+    def _modify_subscription(self, customer, plan, max_users):
         """Modify the subscription on stripe for the new plan"""
 
+        # if we are trying to modify the subscription, one should already exist
+        # if for some reason it does not, then just create a new one
+        if self.subscription is None:  # pragma: no cover
+            logger.warning(
+                "Trying to modify non-existent subscription for organization - %d - %s",
+                self.pk,
+                self,
+            )
+            self._create_subscription(customer, plan, max_users)
+            return
+
+        if not customer.email:
+            customer.email = self.email
+            customer.save()
         stripe.Subscription.modify(
             self.subscription_id,
             cancel_at_period_end=False,
@@ -257,6 +383,7 @@ class Organization(AvatarMixin, models.Model):
                 }
             ],
             billing="send_invoice" if plan.annual else "charge_automatically",
+            days_until_due=30 if plan.annual else None,
         )
 
         self._modify_plan(plan, max_users)
@@ -276,18 +403,30 @@ class Organization(AvatarMixin, models.Model):
 
         self.save()
 
+    def subscription_cancelled(self):
+        """The subsctription was cancelled due to payment failure"""
+        free_plan = Plan.objects.get(slug="free")
+        self.change_logs.create(
+            reason=OrganizationChangeLog.FAILED,
+            from_plan=self.plan,
+            from_next_plan=self.next_plan,
+            from_max_users=self.max_users,
+            to_plan=free_plan,
+            to_next_plan=free_plan,
+            to_max_users=self.max_users,
+        )
+        self.subscription_id = None
+        self.plan = self.next_plan = free_plan
+        self.save()
+
     def charge(self, amount, description, fee_amount=0, token=None, save_card=False):
         """Charge the organization and optionally save their credit card"""
         if save_card:
             self.save_card(token)
             token = None
-        charge = Charge(
-            organization=self,
-            amount=amount,
-            fee_amount=fee_amount,
-            description=description,
+        charge = Charge.objects.make_charge(
+            self, token, amount, fee_amount, description
         )
-        charge.make_charge(token)
         return charge
 
     def set_receipt_emails(self, emails):
@@ -303,17 +442,21 @@ class Membership(models.Model):
     """Through table for organization membership"""
 
     user = models.ForeignKey(
-        "users.User", on_delete=models.CASCADE, related_name="memberships"
+        verbose_name=_("user"),
+        to="users.User",
+        on_delete=models.CASCADE,
+        related_name="memberships",
     )
     organization = models.ForeignKey(
-        "organizations.Organization",
+        verbose_name=_("organization"),
+        to="organizations.Organization",
         on_delete=models.CASCADE,
         related_name="memberships",
     )
     admin = models.BooleanField(
         _("admin"),
         default=False,
-        help_text="This user has administrative rights for this organization",
+        help_text=_("This user has administrative rights for this organization"),
     )
 
     class Meta:
@@ -344,16 +487,43 @@ class Plan(models.Model):
 
     objects = PlanQuerySet.as_manager()
 
-    name = models.CharField(_("name"), max_length=255)
-    slug = AutoSlugField(_("slug"), populate_from="name", unique=True)
+    name = models.CharField(_("name"), max_length=255, help_text=_("The plan's name"))
+    slug = AutoSlugField(
+        _("slug"),
+        populate_from="name",
+        unique=True,
+        help_text=_("A uinique slug to identify the plan"),
+    )
 
-    minimum_users = models.PositiveSmallIntegerField(_("minimum users"), default=1)
-    base_price = models.PositiveSmallIntegerField(_("base price"), default=0)
-    price_per_user = models.PositiveSmallIntegerField(_("price per user"), default=0)
+    minimum_users = models.PositiveSmallIntegerField(
+        _("minimum users"),
+        default=1,
+        help_text=_("The minimum number of users allowed on this plan"),
+    )
+    base_price = models.PositiveSmallIntegerField(
+        _("base price"),
+        default=0,
+        help_text=_(
+            "The price per month for this plan with the minimum number of users"
+        ),
+    )
+    price_per_user = models.PositiveSmallIntegerField(
+        _("price per user"),
+        default=0,
+        help_text=_("The additional cost per month per user over the minimum"),
+    )
 
-    feature_level = models.PositiveSmallIntegerField(_("feature level"), default=0)
+    feature_level = models.PositiveSmallIntegerField(
+        _("feature level"),
+        default=0,
+        help_text=_("Specifies the level of premium features this plan grants"),
+    )
 
-    public = models.BooleanField(_("public"), default=False)
+    public = models.BooleanField(
+        _("public"),
+        default=False,
+        help_text=_("Is this plan available for anybody to sign up for?"),
+    )
     annual = models.BooleanField(
         _("annual"),
         default=False,
@@ -371,7 +541,8 @@ class Plan(models.Model):
     )
 
     private_organizations = models.ManyToManyField(
-        "organizations.Organization",
+        verbose_name=_("private organizations"),
+        to="organizations.Organization",
         related_name="private_plans",
         help_text=_(
             "For private plans, organizations which should have access to this plan"
@@ -383,6 +554,13 @@ class Plan(models.Model):
 
     def free(self):
         return self.base_price == 0 and self.price_per_user == 0
+
+    def requires_payment(self):
+        """Does this plan require immediate payment?
+        Free plans never require payment
+        Annual payments are invoiced and do not require payment at time of purchase
+        """
+        return not self.free() and not self.annual
 
     def cost(self, users):
         return (
@@ -424,7 +602,7 @@ class Plan(models.Model):
                     product={"name": self.name, "unit_label": "Seats"},
                     **kwargs,
                 )
-            except stripe.error.InvalidRequestError:
+            except stripe.error.InvalidRequestError:  # pragma: no cover
                 # if the plan already exists, just skip
                 pass
 
@@ -447,18 +625,32 @@ class Invitation(models.Model):
     objects = InvitationQuerySet.as_manager()
 
     organization = models.ForeignKey(
-        "organizations.Organization",
+        verbose_name=_("organization"),
+        to="organizations.Organization",
         related_name="invitations",
         on_delete=models.CASCADE,
+        help_text=_("The organization this invitation is for"),
     )
-    uuid = models.UUIDField(_("uuid"), default=uuid.uuid4, editable=False)
-    email = models.EmailField(_("email"))
+    uuid = models.UUIDField(
+        _("UUID"),
+        default=uuid.uuid4,
+        editable=False,
+        help_text=_("This UUID serves as a secret token for this invitation in URLs"),
+    )
+    email = models.EmailField(
+        _("email"), help_text=_("The email address to send this invitation to")
+    )
     user = models.ForeignKey(
-        "users.User",
+        verbose_name=_("user"),
+        to="users.User",
         related_name="invitations",
         on_delete=models.PROTECT,
         blank=True,
         null=True,
+        help_text=_(
+            "The user this invitation is for.  Used if a user requested an "
+            "invitation directly as opposed to an admin inviting them via email."
+        ),
     )
     request = models.BooleanField(
         _("request"),
@@ -466,10 +658,27 @@ class Invitation(models.Model):
         "to the user from an admin?",
         default=False,
     )
-    created_at = AutoCreatedField(_("created at"))
-    # NULL accepted_at signifies it has not been accepted yet
-    accepted_at = models.DateTimeField(_("accepted at"), blank=True, null=True)
-    rejected_at = models.DateTimeField(_("rejected at"), blank=True, null=True)
+    created_at = AutoCreatedField(
+        _("created at"), help_text=_("When this invitation was created")
+    )
+    accepted_at = models.DateTimeField(
+        _("accepted at"),
+        blank=True,
+        null=True,
+        help_text=_(
+            "When this invitation was accepted.  NULL signifies it has not been "
+            "accepted yet"
+        ),
+    )
+    rejected_at = models.DateTimeField(
+        _("rejected at"),
+        blank=True,
+        null=True,
+        help_text=_(
+            "When this invitation was rejected.  NULL signifies it has not been "
+            "rejected yet"
+        ),
+    )
 
     class Meta:
         ordering = ("created_at",)
@@ -498,7 +707,8 @@ class Invitation(models.Model):
             self.user = user
         self.accepted_at = timezone.now()
         self.save()
-        Membership.objects.create(organization=self.organization, user=self.user)
+        if not self.organization.has_member(self.user):
+            Membership.objects.create(organization=self.organization, user=self.user)
 
     def reject(self):
         """Reject or revoke the invitation"""
@@ -519,12 +729,20 @@ class ReceiptEmail(models.Model):
     """An email address to send receipts to"""
 
     organization = models.ForeignKey(
-        "organizations.Organization",
+        verbose_name=_("organization"),
+        to="organizations.Organization",
         related_name="receipt_emails",
         on_delete=models.CASCADE,
+        help_text=_("The organization this receipt email corresponds to"),
     )
-    email = CIEmailField(_("email"))
-    failed = models.BooleanField(_("failed"), default=False)
+    email = CIEmailField(
+        _("email"), help_text=_("The email address to send the receipt to")
+    )
+    failed = models.BooleanField(
+        _("failed"),
+        default=False,
+        help_text=_("Has sending to this email address failed?"),
+    )
 
     class Meta:
         unique_together = ("organization", "email")
@@ -536,18 +754,34 @@ class ReceiptEmail(models.Model):
 class Charge(models.Model):
     """A payment charged to an organization through Stripe"""
 
+    objects = ChargeQuerySet.as_manager()
+
     amount = models.PositiveIntegerField(_("amount"), help_text=_("Amount in cents"))
     fee_amount = models.PositiveSmallIntegerField(
         _("fee amount"), default=0, help_text=_("Fee percantage")
     )
     organization = models.ForeignKey(
-        "organizations.Organization", related_name="charges", on_delete=models.PROTECT
+        verbose_name=_("organization"),
+        to="organizations.Organization",
+        related_name="charges",
+        on_delete=models.PROTECT,
+        help_text=_("The organization charged"),
     )
-    created_at = models.DateTimeField(_("created at"))
-    charge_id = models.CharField(_("charge_id"), max_length=255, unique=True)
+    created_at = models.DateTimeField(
+        _("created at"), help_text=_("When the charge was created")
+    )
+    charge_id = models.CharField(
+        _("charge_id"),
+        max_length=255,
+        unique=True,
+        help_text=_("The strip ID for the charge"),
+    )
 
-    # type & quantity ??
-    description = models.CharField(_("description"), max_length=255)
+    description = models.CharField(
+        _("description"),
+        max_length=255,
+        help_text=_("A description of what the charge was for"),
+    )
 
     class Meta:
         ordering = ("-created_at",)
@@ -557,30 +791,6 @@ class Charge(models.Model):
 
     def get_absolute_url(self):
         return reverse("organizations:charge", kwargs={"pk": self.pk})
-
-    def make_charge(self, token=None):
-        """Make the charge on stripe"""
-        customer = self.organization.customer
-        if token:
-            source = customer.sources.create(source=token)
-        else:
-            source = self.organization.card
-
-        charge = stripe.Charge.create(
-            amount=self.amount,
-            currency="usd",
-            customer=customer,
-            description=self.description,
-            source=source,
-            metadata={"organization": self.organization.name},
-        )
-        if token:
-            source.delete()
-        self.charge_id = charge.id
-        self.created_at = datetime.fromtimestamp(
-            charge.created, tz=get_current_timezone()
-        )
-        self.save()
 
     @mproperty
     def charge(self):
@@ -597,7 +807,11 @@ class Charge(models.Model):
             template="organizations/email/receipt.html",
             organization=self.organization,
             organization_to=ORG_TO_RECEIPTS,
-            extra_context={"charge": self},
+            extra_context={
+                "charge": self,
+                "individual_subscription": self.description == "Professional",
+                "group_subscription": self.description.startswith("Organization"),
+            },
         )
 
     def items(self):
@@ -611,3 +825,85 @@ class Charge(models.Model):
             ]
         else:
             return [{"name": self.description, "price": self.amount_dollars}]
+
+
+class OrganizationChangeLog(models.Model):
+    """Track important changes to organizations"""
+
+    CREATED = 0
+    UPDATED = 1
+    FAILED = 2
+
+    created_at = AutoCreatedField(
+        _("created at"), help_text=_("When the organization was changed")
+    )
+
+    organization = models.ForeignKey(
+        verbose_name=_("organization"),
+        to="organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="change_logs",
+        help_text=_("The organization which changed"),
+    )
+    user = models.ForeignKey(
+        verbose_name=_("user"),
+        to="users.User",
+        related_name="change_logs",
+        on_delete=models.PROTECT,
+        blank=True,
+        null=True,
+        help_text=_("The user who changed the organization"),
+    )
+    reason = models.PositiveSmallIntegerField(
+        _("reason"),
+        choices=(
+            (CREATED, _("Created")),
+            (UPDATED, _("Updated")),
+            (FAILED, _("Payment failed")),
+        ),
+        help_text=_("Which category of change occurred"),
+    )
+
+    from_plan = models.ForeignKey(
+        verbose_name=_("from plan"),
+        to="organizations.Plan",
+        on_delete=models.PROTECT,
+        related_name="+",
+        blank=True,
+        null=True,
+        help_text=_("The organization's plan before the change occurred"),
+    )
+    from_next_plan = models.ForeignKey(
+        verbose_name=_("from next plan"),
+        to="organizations.Plan",
+        on_delete=models.PROTECT,
+        related_name="+",
+        blank=True,
+        null=True,
+        help_text=_("The organization's next_plan before the change occurred"),
+    )
+    from_max_users = models.IntegerField(
+        _("maximum users"),
+        blank=True,
+        null=True,
+        help_text=_("The organization's max_users before the change occurred"),
+    )
+
+    to_plan = models.ForeignKey(
+        verbose_name=_("to plan"),
+        to="organizations.Plan",
+        on_delete=models.PROTECT,
+        related_name="+",
+        help_text=_("The organization's plan after the change occurred"),
+    )
+    to_next_plan = models.ForeignKey(
+        verbose_name=_("to next plan"),
+        to="organizations.Plan",
+        on_delete=models.PROTECT,
+        related_name="+",
+        help_text=_("The organization's plan after the change occurred"),
+    )
+    to_max_users = models.IntegerField(
+        _("maximum users"),
+        help_text=_("The organization's max_users after the change occurred"),
+    )
