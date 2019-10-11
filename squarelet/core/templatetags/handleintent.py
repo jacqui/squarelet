@@ -28,7 +28,7 @@ def handleintent(context, header, message):
     intent_lookup = OrderedDict(
         [
             ("muckrock", (MUCKROCK_SERVICE, MUCKROCK_ASSET)),
-            # ("documentcloud", (DOCUMENTCLOUD_SERVICE, DOCUMENTCLOUD_ASSET)),
+            ("documentcloud", (DOCUMENTCLOUD_SERVICE, DOCUMENTCLOUD_ASSET)),
             ("foiamachine", (FOIAMACHINE_SERVICE, FOIAMACHINE_ASSET)),
             # ("quackbot", (QUACKBOT_SERVICE, QUACKBOT_ASSET)),
         ]
