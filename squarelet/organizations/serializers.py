@@ -206,7 +206,7 @@ class PressPassNestedInvitationSerializer(serializers.ModelSerializer):
 
 
 class PressPassInvitationSerializer(serializers.ModelSerializer):
-    organization = serializers.SlugRelatedField(slug_field="uuid", read_only=True)
+    organization = serializers.SerializerMethodField()
     user = serializers.SlugRelatedField(slug_field="uuid", read_only=True)
     accept = serializers.BooleanField(write_only=True)
     reject = serializers.BooleanField(write_only=True)
@@ -214,6 +214,7 @@ class PressPassInvitationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invitation
         fields = (
+            "uuid",
             "organization",
             "email",
             "user",
@@ -238,6 +239,9 @@ class PressPassInvitationSerializer(serializers.ModelSerializer):
                 "May not accept and reject the invitation"
             )
         return attrs
+
+    def get_organization(self, obj):
+        return PressPassOrganizationSerializer(obj.organization).data
 
 
 class PressPassPlanSerializer(serializers.ModelSerializer):
